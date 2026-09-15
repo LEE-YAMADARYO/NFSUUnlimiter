@@ -1,6 +1,4 @@
 ﻿#include "stdafx.h"
-#include "stdio.h"
-#include <string>
 #include <windows.h>
 #include "includes\injector\injector.hpp"
 #include "includes\IniReader.h"
