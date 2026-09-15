@@ -3,9 +3,9 @@ NFSU Unlimiter is a script mod which fixes some issues for added cars.<br>
 This fork is highly experimental and may contain bugs or cause the game to crash, please back up your profile/save file before installing.
 
 # New Features
-Fixed hardcoded issues in the car select screen for MainMenu Quick Race and Customization, now they can all display addon cars.<br>
-Fixed a crash that occurred when the number of cars manufacturer icons exceeded the available FNG slots.<br>
-Fixed invalid frontend cross-references, unlock flags that addon cars can never pass are cleared, and unique preset catalog keys stop addon car records from shadowing vanilla cars records.
+- Fixed hardcoded issues in the car select screen for MainMenu Quick Race and Customization, now they can all display addon cars.<br>
+- Fixed a crash that occurred when the number of cars manufacturer icons exceeded the available FNG slots.<br>
+- Fixed invalid frontend cross-references, unlock flags that addon cars can never pass are cleared, and unique preset catalog keys stop addon car records from shadowing vanilla cars records.
 
 # Known Issues
 In slots exceeding the FE limit, the manufacturer icon in the thumbnail slot repeats the icon of the previously placed vehicle, and the highlight does not move with the selection; This needs to be fixed by editing the FNG, see TODO for details.
