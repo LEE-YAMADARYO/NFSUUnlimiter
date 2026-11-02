@@ -1,36 +1,30 @@
 #include "PresetCarSlot.h"
+#include <string.h>
 
 #define CarTypeInfoArray 0x734588
 #define CarDBInstance 0x758C28
 #define StoreCapacity 127
 #define StoreElementSize 0x348
 
+// The global instance is the FEPlayerCarDB member (+0x364) of the active
+// UserProfile (0x7588C4); the savegame pack/loader copy that member raw, so
+// the save/load path only ever sees the in-place store below.
+#define SaveGameProfile 0x7588C4    // active UserProfile; +0x364 == CarDBInstance
+#define InPlaceStoreBase 0x75AC60   // CarDBInstance + 0x2038 (in-place preset store)
+#define InPlaceCountPtr 0x75EE00    // CarDBInstance + 0x61D8 (in-place element count)
+#define StockStoreCount 20          // preset elements the stock savegame format holds
+
 int CarArraySize, CarCount, i;
 bool SortCarsByID, DisappearingWheelsFix;
 
-// ============================================================================
-// Extended preset-car store for the global FEPlayerCarDB (0x758C28)
+// --- Extended preset-car store ---------------------------------------------
 //
-// The Quick Race / customize list lookups, the customize flows and the race
-// loaders all resolve cars through this object's preset-car store: a 20
-// element array at +0x2038 with the element count at +0x61D8. The memory
-// behind the store is filled with other live object fields (second frontend
-// store, unlock manager, ...), so the store cannot grow in place, and the
-// object itself cannot be relocated either: it is a huge structure whose
-// other fields are referenced all over the game, and FEPlayerCarDB also
-// exists as a member inside larger profile objects.
-//
-// Therefore the object stays exactly where it is, but its preset-car store
-// is moved into ExtCarStore below, with the element count in ExtCarCount.
-// Cars beyond the 20 stock slots are built into it like any stock car and
-// become full members of the database, so every lookup (list building,
-// customize entrance, BuildRide, race loading) finds them naturally.
-//
-// The store/count access sites are shared between the global instance and
-// the member instances, so each patched site branches on the instance
-// pointer: the global instance is served from ExtCarStore/ExtCarCount,
-// every other instance keeps the original in-place 20-car behavior.
-// ============================================================================
+// The global FEPlayerCarDB (0x758C28) keeps its preset-car store (20 elements
+// at +0x2038, count at +0x61D8) in a region that can neither grow nor move,
+// so the store is relocated into ExtCarStore below and every access site
+// branches on the instance pointer: the global instance is served from
+// ExtCarStore/ExtCarCount, every other (profile member) instance keeps the
+// original in-place 20-car behavior.
 
 BYTE ExtCarStore[StoreCapacity][StoreElementSize];  // preset elements of the global instance
 unsigned int ExtCarCount;                           // element count of the global instance
@@ -61,18 +55,11 @@ unsigned int GetCarTypeNameHash(BYTE CarTypeID)
 
 // --- DefaultBasePaint restore ----------------------------------------------
 //
-// The preset-ride catalog key (CarTypeInfo+0xC5C) doubles as the BASE_PAINT
-// (CarPart type 30) lookup key: the game resolves a car's stock paint with
-// GetCarPart(0, 30, *(CarTypeInfo+0xC5C), 0, -1), matching it against the
-// paint part's +8 hash field. The unique pseudo keys (0x80000000|index)
-// given to addon cars stop their records from shadowing stock ones, but
-// they also make that paint lookup miss, so SetRandomPaint's first generic
-// paint (the color picker's first gray) survives as the default paint.
-//
-// Fix: keep the pseudo keys in place, but save every addon car's original
-// +0xC5C value and translate the key back in the game's four paint lookups.
-// Everything else (the ride-catalog shadowing protection) still sees the
-// pseudo keys, and stock cars are untouched.
+// The unique pseudo catalog keys (0x80000000|index) written to CarTypeInfo+0xC5C
+// stop addon records from shadowing stock ones, but the same field doubles as
+// the BASE_PAINT lookup key, so the addon cars' stock paint lookup would miss.
+// RealBasePaint keeps each original key and the four caves below translate it
+// back in the paint lookups; stock cars are untouched.
 
 unsigned int RealBasePaint[StoreCapacity]; // original CarTypeInfo+0xC5C per addon car index
 
@@ -153,22 +140,11 @@ void __declspec(naked) BasePaintCave4()
 
 // --- ThumbnailScroller null-current guard -----------------------------------
 //
-// The car select screens attach every listed car to a ThumbnailScroller,
-// which hands out "slot" FE objects from the frontend package: all slot
-// objects share one name ("car_thumb" in the "car_thumb" package for the QR
-// / customize screens), and the stock slot finder walks the package object
-// list and returns 0 once the list runs out. The pool therefore holds
-// exactly as many slots as the frontend ships; with more listed cars than
-// that, AddNode fails silently for the extra cars and their nodes never
-// enter the scroller. When one of those cars is the selected one,
-// SnapToItem leaves the scroller's current item null and the first
-// ThumbnailScroller::Update frame dereferences it (crash at 0x4F8A12).
-//
-// Fix: guard Update against a null current item and fall back to the first
-// node instead. The stock pool-exhaustion path stays in charge: cars
-// without a slot keep working everywhere else (lists, customize, races),
-// they just have no thumbnail highlight on the strip. To give every car a
-// slot, ship frontend FNGs with more "car_thumb" objects.
+// The frontend ships a fixed pool of "car_thumb" slot objects; with more
+// listed cars than slots the scroller's current item stays null and
+// ThumbnailScroller::Update dereferences it (crash at 0x4F8A12). The cave
+// falls back to the first node instead; cars without a slot keep working
+// everywhere else, they just get no thumbnail highlight.
 
 // 0x4F8A0C: push ebx / push ebp / mov ebp, [edi+0Ch] in ThumbnailScroller::Update.
 // If the current item is null, fall back to the first node and store it back
@@ -692,6 +668,240 @@ void __declspec(naked) PartsHeadReadCodeCave()
 	}
 }
 
+// --- Savegame preset-ride bridge -------------------------------------------
+//
+// The save/load path never goes through the redirected store: the savegame pack
+// copies the active profile's embedded FEPlayerCarDB raw (in-place store
+// included) and the loaders write savegame rides straight back into it, so
+// garage customizations (which land in ExtCarStore) never reach a savegame and
+// loaded rides never become visible. Three bridges close both directions:
+// pack 0x4AB165 mirrors ExtCarStore over the in-place store before the pack,
+// unpack 0x4AB21D and sync 0x4CC7AD merge the in-place store back into
+// ExtCarStore after a load. The merge never shrinks ExtCarCount, so the addon
+// elements built at boot (indexes >= 20) survive a load.
+
+// Copies the first min([InPlaceCountPtr], StoreCapacity) preset elements from
+// the in-place store into ExtCarStore, raising ExtCarCount to cover them.
+// All registers preserved.
+void __declspec(naked) MergeInPlaceToExtStore()
+{
+	_asm
+	{
+		pushad
+		mov eax, dword ptr ds:[InPlaceCountPtr]   // loaded element count
+		test eax, eax
+		jz mergeDone
+		cmp eax, StoreCapacity
+		jbe mergeCountOk
+		mov eax, StoreCapacity
+	mergeCountOk:
+		cmp eax, dword ptr [ExtCarCount]
+		jle mergeHaveBase                      // never shrink the count
+		mov dword ptr [ExtCarCount], eax
+	mergeHaveBase:
+		mov edx, eax
+		imul edx, edx, StoreElementSize        // byte count
+		mov ecx, edx
+		shr ecx, 2
+		mov esi, InPlaceStoreBase
+		mov edi, dword ptr [ExtStoreBase]
+		rep movsd
+	mergeDone:
+		popad
+		ret
+	}
+}
+
+// 0x4AB165: sub_4AB120's preset store copy setup (ebp = source profile).
+// Mirrors ExtCarStore (first 20 elements + count) over the in-place store so
+// the raw blob copy packs current rides; only fires for the active profile.
+void __declspec(naked) SavePackBridgeCodeCave()
+{
+	_asm
+	{
+		cmp ebp, SaveGameProfile
+		jne packNoBridge
+		pushad
+		mov eax, dword ptr [ExtCarCount]
+		cmp eax, StockStoreCount
+		jbe packCountOk
+		mov eax, StockStoreCount
+	packCountOk:
+		mov dword ptr ds:[InPlaceCountPtr], eax
+		mov edx, eax
+		imul edx, edx, StoreElementSize
+		mov ecx, edx
+		shr ecx, 2
+		mov esi, dword ptr [ExtStoreBase]
+		mov edi, InPlaceStoreBase
+		rep movsd
+		popad
+	packNoBridge:
+		mov ecx, 0x18B4
+		lea esi, dword ptr [ebp+0x364]
+		push 0x4AB170
+		retn
+	}
+}
+
+// 0x4AB21D: sub_4AB200's preset store copy (savegame blob -> profile's
+// embedded FEPlayerCarDB). Unpacking into the active profile lands savegame
+// rides in the in-place store, so merge them into ExtCarStore afterwards.
+void __declspec(naked) LoadUnpackBridgeCodeCave()
+{
+	_asm
+	{
+		mov ecx, 0x18B4
+		lea edi, dword ptr [edx+0x364]
+		rep movsd
+		cmp edx, SaveGameProfile
+		jne unpackNoBridge
+		call MergeInPlaceToExtStore
+	unpackNoBridge:
+		push 0x4AB22A
+		retn
+	}
+}
+
+// 0x4CC7AD: call sub_4CC7C0 - the career load sync's career-manager copy;
+// edi holds the target stable base (callee-saved). For stable 0 (the global
+// instance) the sync landed the loaded rides in the in-place store, so merge
+// them into ExtCarStore. Hooking the 5-byte call avoids stomping the
+// neighboring function's epilogue at 0x4CC7B5.
+unsigned int SyncCareerManager = 0x4CC7C0; // game: copies the profile's FECareerManager member
+
+void __declspec(naked) LoadSyncBridgeCodeCave()
+{
+	_asm
+	{
+		call dword ptr [SyncCareerManager]
+		cmp edi, CarDBInstance
+		jne syncNoBridge
+		call MergeInPlaceToExtStore
+	syncNoBridge:
+		push 0x4CC7B2
+		retn
+	}
+}
+
+// --- Savegame trailer (addon preset elements) -------------------------------
+//
+// The .ugd savegame blob holds exactly 20 preset elements (the stock car
+// types) and its trailing adler checksum covers the blob only, so the addon
+// elements (ExtCarStore[20..count)) ride along in a trailer appended after it:
+// [dword 0x31464C55 ("ULF1")][dword count][elements * 0x348]. Nothing is
+// appended while ExtCarCount <= 20, keeping such saves byte-identical to
+// stock, and the stock reader never touches anything past the checksum. On
+// load the elements are placed back by their +8 car-type hash.
+
+#define SaveTrailerMagic 0x31464C55 // "ULF1"
+#define SaveTrailerHeaderSize 8
+
+BYTE ExtTrailer[SaveTrailerHeaderSize + (StoreCapacity - StockStoreCount) * StoreElementSize];
+
+// game CRT wrappers / import thunks, called through memory operands so the
+// caves stay position independent
+unsigned int GameFread = 0x67163D;  // game: fread wrapper (buf, size, n, FILE*)
+unsigned int GameFwrite = 0x671A61; // game: fwrite wrapper (buf, size, n, FILE*)
+unsigned int GameFclose = 0x671F1F; // game: fclose import
+unsigned int GameFree = 0x671102;   // game: free import
+
+typedef unsigned int(__cdecl* GameFread_t)(void* buf, unsigned int size, unsigned int n, void* fp);
+typedef unsigned int(__cdecl* GameFwrite_t)(const void* buf, unsigned int size, unsigned int n, void* fp);
+
+// Fills ExtTrailer with the addon preset elements and returns the trailer size
+// in bytes (0 = nothing to append).
+unsigned int __cdecl BuildSaveTrailer()
+{
+	if (ExtCarCount <= StockStoreCount)
+		return 0;
+	unsigned int count = ExtCarCount;
+	if (count > StoreCapacity)
+		count = StoreCapacity;
+	unsigned int elements = count - StockStoreCount;
+	((unsigned int*)ExtTrailer)[0] = SaveTrailerMagic;
+	((unsigned int*)ExtTrailer)[1] = count;
+	memcpy(ExtTrailer + SaveTrailerHeaderSize, &ExtCarStore[StockStoreCount], elements * StoreElementSize);
+	return SaveTrailerHeaderSize + elements * StoreElementSize;
+}
+
+// Reads the trailer from an open .ugd file and merges its elements into
+// ExtCarStore by +8 car-type hash; types that no longer exist are skipped.
+void __cdecl MergeLoadTrailer(void* fp)
+{
+	unsigned int header[2];
+	if (((GameFread_t)GameFread)(header, 4, 2, fp) != 2)
+		return;
+	if (header[0] != SaveTrailerMagic)
+		return;
+	unsigned int count = header[1];
+	if (count > StoreCapacity)
+		count = StoreCapacity;
+	if (count <= StockStoreCount)
+		return;
+	BYTE element[StoreElementSize];
+	for (unsigned int i = StockStoreCount; i < count; i++)
+	{
+		if (((GameFread_t)GameFread)(element, StoreElementSize, 1, fp) != 1)
+			return;
+		unsigned int hash = *(unsigned int*)(element + 8);
+		for (unsigned int j = 0; j < ExtCarCount; j++)
+		{
+			if (*(unsigned int*)(ExtCarStore[j] + 8) == hash)
+			{
+				memcpy(ExtCarStore[j], element, StoreElementSize);
+				break;
+			}
+		}
+	}
+}
+
+// 0x41DA0C: push esi / call _free in the .ugd writer - appends the trailer
+// right after the CRC dword, then replicates the stolen bytes.
+void __declspec(naked) SaveTrailerAppendCave()
+{
+	_asm
+	{
+		pushad
+		call BuildSaveTrailer
+		test eax, eax
+		jz noTrailer
+		push ebp                       // FILE*
+		push eax                       // n
+		push 1                         // size
+		push offset ExtTrailer         // buf
+		call dword ptr [GameFwrite]
+		add esp, 10h
+	noTrailer:
+		popad
+		push esi                       // stolen: push esi
+		call dword ptr [GameFree]      // stolen: call _free
+		push 0x41DA12
+		retn
+	}
+}
+
+// 0x41DB19: call _fclose on the .ugd reader's success path - reads the trailer
+// while the file is still open (the FILE* was pushed at 0x41DAF9), then
+// replicates the stolen call.
+void __declspec(naked) SaveTrailerLoadCave()
+{
+	_asm
+	{
+		pushad
+		mov eax, dword ptr [esp+32]    // FILE* pushed before the hook
+		push eax
+		call MergeLoadTrailer
+		add esp, 4
+		popad
+		call dword ptr [GameFclose]    // stolen: call _fclose (arg still on stack)
+		push 0x41DB1E
+		retn
+	}
+}
+
+
+
 void __declspec(naked) DoUnlimiterStuffCodeCave()
 {
 	// Get count
@@ -876,6 +1086,18 @@ void __declspec(naked) DoUnlimiterStuffCodeCave()
 	injector::MakeJMP(0x4AC00B, FindLoopBoundCodeCave, true); // sub_4ABFC0 find loop end (crashy not-found path)
 	injector::MakeJMP(0x4AC52A, DefaultCarTailCodeCave, true); // DefaultCustomizableCars tail (tolerate not-found)
 	injector::MakeJMP(0x4AC7A1, PartsHeadReadCodeCave, true); // preserve the parts-list head null path
+
+	// Savegame preset-ride bridge: mirror ExtCarStore into the pack (all 9
+	// savegame pack sites) and merge loaded rides back out of the two loader
+	// paths that write the active profile's in-place store
+	injector::MakeJMP(0x4AB165, SavePackBridgeCodeCave, true); // sub_4AB120 pack (profile -> savegame blob)
+	injector::MakeJMP(0x4AB21D, LoadUnpackBridgeCodeCave, true); // sub_4AB200 unpack (savegame blob -> active profile)
+	injector::MakeJMP(0x4CC7AD, LoadSyncBridgeCodeCave, true); // sub_4CC770 career-manager call (temp profile -> stable 0)
+
+	// Savegame trailer: append/restore the addon preset elements in the .ugd
+	// savegame files (after the adler CRC, invisible to the stock reader)
+	injector::MakeJMP(0x41DA0C, SaveTrailerAppendCave, true); // sub_41D8A0 .ugd writer, after the CRC write
+	injector::MakeJMP(0x41DB19, SaveTrailerLoadCave, true); // sub_41DA40 .ugd reader, replaces call _fclose
 
 	// sub_4ABFC0's scan-fail path (0x4ABFF6: xor eax,eax then cmp [eax+0xC50])
 	// dereferences counter+0xC50 when the scan fails - instead of patching the

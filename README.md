@@ -1,4 +1,4 @@
-# NFSU Unlimiter Fork Beta 1
+# NFSU Unlimiter Fork Beta
 NFSU Unlimiter is a script mod which fixes some issues for added cars.<br>
 This fork is highly experimental and may contain bugs or cause the game to crash, please back up your profile/save file before installing.<br>
 
@@ -9,14 +9,12 @@ This fork is highly experimental and may contain bugs or cause the game to crash
 
 # Known Issues
 - In slots exceeding the FE limit, the manufacturer icon in the thumbnail slot repeats the icon of the previously placed vehicle, and the highlight does not move with the selection; This needs to be fixed by editing the FNG, see TODO for details.<br>
-- Added on Oct 28: In certain scenarios, it may not be possible to save custom performance parts.<br>
 
 # TODO
 - Add UnlimiterData configurations for each car, so the modders can configure if the cars can be used by AI opponents.<br>
 - Edit frontend FNG files so every listed car gets its own thumbnail slot and manufacturer icon.<br>
 - Extensive testing, including stability checks for Underground mode and profiles.<br>
 - Fix known issues whenever possible.<br>
-etc.
 
 # Download
 - Compiled .asi files are available on the Releases page.<br>
