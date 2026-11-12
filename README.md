@@ -1,4 +1,5 @@
 # NFSU Unlimiter Fork Beta
+## Note: This project was assisted by an LLM.
 NFSU Unlimiter is a script mod which fixes some issues for added cars.<br>
 This fork is highly experimental and may contain bugs or cause the game to crash, please back up your profile/save file before installing.<br>
 
